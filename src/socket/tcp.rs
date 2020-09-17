@@ -995,6 +995,15 @@ impl<'a> TcpSocket<'a> {
                            self.meta.handle, self.local_endpoint, self.remote_endpoint);
                 return Err(Error::Dropped)
             }
+            // Any ACK in the SYN-SENT state must have the SYN flag set.
+            (State::SynSent, &TcpRepr {
+                control: TcpControl::None, ack_number: Some(_), ..
+            }) => {
+                net_debug!("{}:{}:{}: expecting a SYN|ACK",
+                           self.meta.handle, self.local_endpoint, self.remote_endpoint);
+                self.abort();
+                return Err(Error::Dropped)
+            }
             // Every acknowledgement must be for transmitted but unacknowledged data.
             (_, &TcpRepr { ack_number: Some(ack_number), .. }) => {
                 let unacknowledged = self.tx_buffer.len() + control_len;
@@ -1417,8 +1426,11 @@ impl<'a> TcpSocket<'a> {
     }
 
     fn window_to_update(&self) -> bool {
-        (self.rx_buffer.window() >> self.remote_win_shift) as u16 >
-            self.remote_last_win
+        match self.state {
+            State::SynSent | State::SynReceived | State::Established | State::FinWait1 | State::FinWait2 =>
+                (self.rx_buffer.window() >> self.remote_win_shift) as u16 > self.remote_last_win,
+            _ => false,
+        }
     }
 
     pub(crate) fn dispatch<F>(&mut self, timestamp: Instant, caps: &DeviceCapabilities,
@@ -2485,6 +2497,17 @@ mod test {
             ..SEND_TEMPL
         }, Err(Error::Dropped));
         assert_eq!(s.state, State::SynSent);
+    }
+
+    #[test]
+    fn test_syn_sent_bad_ack() {
+        let mut s = socket_syn_sent();
+        send!(s, TcpRepr {
+            control: TcpControl::None,
+            ack_number: Some(TcpSeqNumber(1)),
+            ..SEND_TEMPL
+        }, Err(Error::Dropped));
+        assert_eq!(s.state, State::Closed);
     }
 
     #[test]
@@ -4081,6 +4104,60 @@ mod test {
             payload: &[0; 1000][..],
             ..RECV_TEMPL
         }));
+    }
+
+    #[test]
+    fn test_close_wait_no_window_update() {
+        let mut s = socket_established();
+        send!(s, TcpRepr {
+            control: TcpControl::Fin,
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            payload: &[1,2,3,4],
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.state, State::CloseWait);
+
+        // we ack the FIN, with the reduced window size.
+        recv!(s, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 6),
+            window_len: 60,
+            ..RECV_TEMPL
+        }));
+
+        let rx_buf = &mut [0; 32];
+        assert_eq!(s.recv_slice(rx_buf), Ok(4));
+
+        // check that we do NOT send a window update even if it has changed.
+        recv!(s, Err(Error::Exhausted));
+    }
+
+    #[test]
+    fn test_time_wait_no_window_update() {
+        let mut s = socket_fin_wait_2();
+        send!(s, TcpRepr {
+            control: TcpControl::Fin,
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 2),
+            payload: &[1,2,3,4],
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.state, State::TimeWait);
+
+        // we ack the FIN, with the reduced window size.
+        recv!(s, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 2,
+            ack_number: Some(REMOTE_SEQ + 6),
+            window_len: 60,
+            ..RECV_TEMPL
+        }));
+
+        let rx_buf = &mut [0; 32];
+        assert_eq!(s.recv_slice(rx_buf), Ok(4));
+
+        // check that we do NOT send a window update even if it has changed.
+        recv!(s, Err(Error::Exhausted));
     }
 
     // =========================================================================================//
