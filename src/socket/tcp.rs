@@ -200,6 +200,9 @@ pub struct TcpSocket<'a> {
     keep_alive:      Option<Duration>,
     /// The time-to-live (IPv4) or hop limit (IPv6) value used in outgoing packets.
     hop_limit:       Option<u8>,
+
+    listens_any: bool,
+
     /// Address passed to listen(). Listen address is set when listen() is called and
     /// used every time the socket is reset back to the LISTEN state.
     listen_address:  IpAddress,
@@ -281,6 +284,7 @@ impl<'a> TcpSocket<'a> {
             timeout:         None,
             keep_alive:      None,
             hop_limit:       None,
+            listens_any:      false,
             listen_address:  IpAddress::default(),
             local_endpoint:  IpEndpoint::default(),
             remote_endpoint: IpEndpoint::default(),
@@ -458,6 +462,11 @@ impl<'a> TcpSocket<'a> {
         self.remote_endpoint = IpEndpoint::default();
         self.set_state(State::Listen);
         Ok(())
+    }
+
+    pub fn listen_any(&mut self) -> Result<()> {
+        self.listens_any = true;
+        self.listen(1)
     }
 
     /// Connect to a given endpoint.
@@ -925,6 +934,7 @@ impl<'a> TcpSocket<'a> {
     }
 
     pub(crate) fn accepts(&self, ip_repr: &IpRepr, repr: &TcpRepr) -> bool {
+        println!("calling accepts!");
         if self.state == State::Closed { return false }
 
         // If we're still listening for SYNs and the packet has an ACK, it cannot
@@ -933,7 +943,7 @@ impl<'a> TcpSocket<'a> {
         if self.state == State::Listen && repr.ack_number.is_some() { return false }
 
         // Reject packets with a wrong destination.
-        if self.local_endpoint.port != repr.dst_port { return false }
+        if !self.listens_any && self.local_endpoint.port != repr.dst_port { return false }
         if !self.local_endpoint.addr.is_unspecified() &&
             self.local_endpoint.addr != ip_repr.dst_addr() { return false }
 
